@@ -7,6 +7,26 @@ const FIREBASE_URL = process.env.FIREBASE_URL;
 
 const orderStates = {}; 
 
+// Function to fetch delivery prices from Firebase
+async function getDeliveryPrice(address) {
+    try {
+        const response = await fetch(`${FIREBASE_URL}/deliveryPrices.json`);
+        const priceData = await response.json();
+        if (!priceData) return 50; // Default delivery fee
+        
+        // Match address to delivery zone and return dynamic price
+        for (let zone in priceData) {
+            if (address.toLowerCase().includes(zone.toLowerCase())) {
+                return parseFloat(priceData[zone].price);
+            }
+        }
+        return 50; // Default if no match
+    } catch (error) {
+        console.error("Failed to fetch delivery price:", error);
+        return 50; // Default delivery fee on error
+    }
+}
+
 // Function to fetch the dynamic menu from your App's Firebase
 async function getMenuFromApp() {
     try {
@@ -14,7 +34,6 @@ async function getMenuFromApp() {
         const data = await response.json();
         if (!data) return[];
         
-        // Convert Firebase object into an array (now includes imageUrl)
         return Object.keys(data).map(key => ({
             id: key,
             name: data[key].name,
@@ -67,42 +86,42 @@ async function startBot() {
     sock.ev.on('messages.upsert', async (m) => {
         const msg = m.messages[0];
         if (!msg.message || msg.key.remoteJid === 'status@broadcast') return;
-        if (msg.key.fromMe) return; // Loop Protection
+        if (msg.key.fromMe) return;
 
-        // 🔧 FIX 1: SKIP GROUP CHATS (@g.us)
+        // Skip group chats
         if (msg.key.remoteJid.includes('@g.us')) {
-            console.log("⚠️ Group message ignored - bot only works in private chats");
+            console.log("⚠️ Group message ignored");
             return;
         }
 
         const sender = msg.key.remoteJid;
         
-        // 🔧 FIX 2: BETTER TEXT EXTRACTION WITH FALLBACK
+        // Safe text extraction
         let text = "";
         if (msg.message.conversation) {
             text = msg.message.conversation;
         } else if (msg.message.extendedTextMessage?.text) {
             text = msg.message.extendedTextMessage.text;
-        } else {
-            text = ""; // Default to empty if no text found
         }
-        
-        text = text.toLowerCase().trim(); // Convert to lowercase once
+        text = text.toLowerCase().trim();
 
         console.log(`📩 Query: ${text}`);
 
         // --- 🛒 STEP 2: FINISH ORDER & SEND TO ADMIN PANEL ---
         if (orderStates[sender]?.step === 'WAITING_FOR_ADDRESS') {
-            const customerDetails = text; // This now contains Name, Phone, and Address
+            const customerDetails = text;
             const item = orderStates[sender].item;
             const customerWaNumber = sender.split('@')[0];
 
-            // Match the exact format of your BongoProjukti Admin Panel
+            // Get dynamic delivery price based on address
+            const deliveryPrice = await getDeliveryPrice(customerDetails);
+            const totalPrice = (parseFloat(item.price) + deliveryPrice).toFixed(2);
+
             const BongoProjuktiOrder = {
                 userId: "whatsapp_" + customerWaNumber,
                 userEmail: "whatsapp@BongoProjukti.com",
-                phone: customerWaNumber, // Keeps their WA number registered
-                address: customerDetails, // Saves Name, Phone, and Address typed by them
+                phone: customerWaNumber,
+                address: customerDetails,
                 location: { lat: 0, lng: 0 },
                 items:[{
                     id: item.id,
@@ -111,13 +130,13 @@ async function startBot() {
                     img: item.imageUrl || "",
                     quantity: 1
                 }],
-                total: (parseFloat(item.price) + 50).toFixed(2), // Price + 50 Delivery Fee
+                deliveryFee: deliveryPrice,
+                total: totalPrice,
                 status: "Placed",
                 method: "Cash on Delivery (WhatsApp)",
                 timestamp: new Date().toISOString()
             };
 
-            // Save order securely via REST API
             try {
                 await fetch(`${FIREBASE_URL}/orders.json`, {
                     method: 'POST',
@@ -128,17 +147,16 @@ async function startBot() {
                 console.log("Firebase Error: ", error);
             }
 
-            await sock.sendMessage(sender, { text: `✅ *Order Placed Successfully!* \n\nThank you! Your order for *${item.name}* is being prepared. \n\n*Total:* ₹${BongoProjuktiOrder.total} (Inc. ₹50 Delivery)` });
+            await sock.sendMessage(sender, { text: `✅ *Order Placed Successfully!* \n\nThank you! Your order for *${item.name}* is being prepared. \n\n🍔 *Item Price:* ₹${item.price}\n🚚 *Delivery Fee:* ₹${deliveryPrice}\n💰 *Total:* ₹${totalPrice}` });
             delete orderStates[sender]; 
             return;
         }
 
-        // --- 🌟 STEP 1: START ORDER FLOW (WITH IMAGE & PHONE REQUEST) ---
+        // --- 🌟 STEP 1: START ORDER FLOW ---
         if (text.startsWith("order ")) {
             const productRequested = text.replace("order ", "").trim();
             const currentMenu = await getMenuFromApp();
             
-            // Search the live database for the requested item
             const matchedItem = currentMenu.find(item => item.name.toLowerCase().includes(productRequested));
 
             if (!matchedItem) {
@@ -148,17 +166,14 @@ async function startBot() {
 
             orderStates[sender] = { step: 'WAITING_FOR_ADDRESS', item: matchedItem };
             
-            // 🌟 NEW: SEND PRODUCT IMAGE + ASK FOR PHONE NUMBER 🌟
             const captionText = `🛒 *Order Started!* \n\nYou selected: *${matchedItem.name}* (₹${matchedItem.price})\n\nPlease reply with your *Full Name, Phone Number, and Delivery Address*.`;
             
-            // If the product has an image URL in Firebase, send it as a WhatsApp Photo
             if (matchedItem.imageUrl) {
                 await sock.sendMessage(sender, { 
                     image: { url: matchedItem.imageUrl }, 
                     caption: captionText 
                 });
             } else {
-                // Fallback if no image is found
                 await sock.sendMessage(sender, { text: captionText });
             }
         }
@@ -184,7 +199,7 @@ async function startBot() {
             await sock.sendMessage(sender, { text: menuMessage });
         }
 
-        // 🔧 FIX 3: CASE-INSENSITIVE GREETING TRIGGERS (hi, Hi, HI all work now)
+        // Case-insensitive greetings
         else if (text === "hi" || text === "hello" || text === "hey") {
             await sock.sendMessage(sender, { text: "👋 *Welcome to BongoProjukti!* \n\nI am your AI Assistant. Type *menu* to see our delicious food, or type *order [dish]* to buy instantly!" });
         }
