@@ -60,7 +60,7 @@ async function startBot() {
         auth: state,
         printQRInTerminal: false,
         logger: pino({ level: 'silent' }),
-        browser:["S", "K", "1"] 
+        browser:["Github", "K", "1"] 
     });
 
     sock.ev.on('connection.update', (update) => {
